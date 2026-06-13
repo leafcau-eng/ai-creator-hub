@@ -841,30 +841,25 @@ function AssetLibraryPage() {
   const [viewMode, setViewMode] = useState("grid"); // grid | list
   const [filterType, setFilterType] = useState("all");
   const [search, setSearch] = useState("");
+  const [uploads, setUploads] = useState([]); // { id, name, progress, status, error, file, assetId, path, signedUrl, contentType, assetType }
+  const fileInputRef = useRef(null);
+
+  const fetchAssets = async () => {
+    try {
+      const res = await fetch("/api/assets");
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Gagal fetch assets");
+      setAssets(json.assets || []);
+    } catch (err) {
+      console.error("[asset-library] fetch error:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchAssets = async () => {
-      try {
-        const supabase = createClient();
-        let query = supabase
-          .from("assets")
-          .select("id, name, type, mime_type, file_url, file_size_bytes, duration_seconds, width, height, source, is_favorite, created_at")
-          .order("created_at", { ascending: false });
-
-        if (filterType !== "all") query = query.eq("type", filterType);
-        if (search.trim()) query = query.ilike("name", `%${search.trim()}%`);
-
-        const { data, error } = await query;
-        if (error) throw error;
-        if (data) setAssets(data);
-      } catch (err) {
-        console.error("[asset-library] fetch error:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
     fetchAssets();
-  }, [filterType, search]);
+  }, []);
 
   const formatSize = (bytes) => {
     if (!bytes) return "—";
@@ -909,6 +904,131 @@ function AssetLibraryPage() {
 
   const FILTERS = ["all", "image", "video", "audio", "document"];
 
+  // --- Upload helpers ---
+
+  const guessAssetType = (mime) => {
+    if (!mime) return "other";
+    if (mime.startsWith("image/")) return "image";
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    if (mime === "application/pdf" || mime.startsWith("text/") || mime.includes("document") || mime.includes("msword") || mime.includes("officedocument")) return "document";
+    return "other";
+  };
+
+  const updateUpload = (uploadId, patch) => {
+    setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, ...patch } : u)));
+  };
+
+  const removeUpload = (uploadId) => {
+    setUploads((prev) => prev.filter((u) => u.id !== uploadId));
+  };
+
+  const startUpload = async (file, uploadId) => {
+    const assetType = guessAssetType(file.type);
+
+    try {
+      // 1. Request signed upload URL + insert pending row
+      const res = await fetch("/api/assets/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          contentType: file.type,
+          fileSize: file.size,
+          assetType,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Gagal memulai upload");
+
+      const { assetId, signedUrl, path } = json;
+      updateUpload(uploadId, { assetId, path, signedUrl, contentType: file.type, assetType, status: "uploading" });
+
+      // 2. PUT file ke signedUrl via XHR untuk progress
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", signedUrl);
+        if (file.type) xhr.setRequestHeader("Content-Type", file.type);
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            updateUpload(uploadId, { progress: pct });
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`Upload gagal (HTTP ${xhr.status})`));
+        };
+        xhr.onerror = () => reject(new Error("Upload gagal — koneksi error"));
+
+        xhr.send(file);
+      });
+
+      // 3. Confirm — set upload_status = ready
+      const confirmRes = await fetch(`/api/assets/${assetId}/confirm`, { method: "PATCH" });
+      const confirmJson = await confirmRes.json();
+      if (!confirmRes.ok) throw new Error(confirmJson.error || "Gagal konfirmasi upload");
+
+      updateUpload(uploadId, { status: "done", progress: 100 });
+      await fetchAssets();
+
+      // Auto-remove dari list upload setelah sebentar
+      setTimeout(() => removeUpload(uploadId), 2000);
+
+    } catch (err) {
+      console.error("[asset-upload] error:", err);
+      updateUpload(uploadId, { status: "error", error: err.message || "Upload gagal" });
+
+      // Rollback row kalau sudah ke-insert
+      const current = uploads.find((u) => u.id === uploadId);
+      const assetId = current?.assetId;
+      if (assetId) {
+        try {
+          await fetch(`/api/assets/${assetId}`, { method: "DELETE" });
+        } catch (delErr) {
+          console.error("[asset-upload] rollback error:", delErr);
+        }
+      }
+    }
+  };
+
+  const retryUpload = (uploadId) => {
+    const upload = uploads.find((u) => u.id === uploadId);
+    if (!upload) return;
+    updateUpload(uploadId, { status: "uploading", progress: 0, error: null, assetId: null });
+    startUpload(upload.file, uploadId);
+  };
+
+  const handleFileSelect = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const newUploads = files.map((file) => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      name: file.name,
+      file,
+      progress: 0,
+      status: "uploading",
+      error: null,
+      assetId: null,
+    }));
+
+    setUploads((prev) => [...prev, ...newUploads]);
+    newUploads.forEach((u) => startUpload(u.file, u.id));
+
+    // reset input agar bisa pilih file yang sama lagi kalau perlu
+    e.target.value = "";
+  };
+
+  // --- Client-side filter (filterType + search) ---
+  const filteredAssets = assets.filter((asset) => {
+    if (filterType !== "all" && asset.type !== filterType) return false;
+    if (search.trim() && !asset.name?.toLowerCase().includes(search.trim().toLowerCase())) return false;
+    return true;
+  });
+
   return (
     <div className="page">
       {/* Toolbar */}
@@ -919,7 +1039,7 @@ function AssetLibraryPage() {
             <div
               key={f}
               className={`tab${filterType === f ? " active" : ""}`}
-              onClick={() => { setFilterType(f); setLoading(true); }}
+              onClick={() => setFilterType(f)}
               style={{ textTransform: "capitalize" }}
             >
               {f === "all" ? "All" : f}
@@ -932,11 +1052,23 @@ function AssetLibraryPage() {
           <Icon d={icons.search} size={14} />
           <input
             value={search}
-            onChange={e => { setSearch(e.target.value); setLoading(true); }}
+            onChange={e => setSearch(e.target.value)}
             placeholder="Search assets…"
             style={{ background: "transparent", border: "none", outline: "none", color: "var(--text)", fontSize: 13, width: "100%", fontFamily: "inherit" }}
           />
         </div>
+
+        {/* Upload button */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          onChange={handleFileSelect}
+          style={{ display: "none" }}
+        />
+        <button className="btn btn-primary" onClick={() => fileInputRef.current?.click()}>
+          <Icon d={icons.plus} size={14} /> Upload
+        </button>
 
         {/* View toggle */}
         <div style={{ display: "flex", gap: 4 }}>
@@ -953,6 +1085,40 @@ function AssetLibraryPage() {
         </div>
       </div>
 
+      {/* Upload progress list */}
+      {uploads.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+          {uploads.map((u) => (
+            <div key={u.id} style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", padding: "10px 14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, marginRight: 12 }}>
+                  {u.name}
+                </div>
+                {u.status === "error" ? (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "var(--danger)" }}>{u.error}</span>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 10px" }} onClick={() => retryUpload(u.id)}>Retry</button>
+                  </div>
+                ) : u.status === "done" ? (
+                  <span style={{ fontSize: 11, color: "var(--accent2)", fontWeight: 600 }}>Done</span>
+                ) : (
+                  <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{u.progress}%</span>
+                )}
+              </div>
+              <div className="progress-bar">
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: `${u.progress}%`,
+                    background: u.status === "error" ? "var(--danger)" : u.status === "done" ? "var(--accent2)" : "var(--accent)",
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Content */}
       {loading ? (
         viewMode === "grid" ? (
@@ -968,7 +1134,7 @@ function AssetLibraryPage() {
             ))}
           </div>
         )
-      ) : assets.length === 0 ? (
+      ) : filteredAssets.length === 0 ? (
         <EmptyState
           icon="library"
           title={search ? "No assets found" : filterType !== "all" ? `No ${filterType}s yet` : "Your asset library is empty"}
@@ -977,7 +1143,7 @@ function AssetLibraryPage() {
       ) : viewMode === "grid" ? (
         /* Grid view */
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12 }}>
-          {assets.map((asset) => (
+          {filteredAssets.map((asset) => (
             <div
               key={asset.id}
               style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: "var(--r-lg)", overflow: "hidden", cursor: "pointer", transition: "border-color .15s" }}
@@ -1017,7 +1183,7 @@ function AssetLibraryPage() {
       ) : (
         /* List view */
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {assets.map((asset) => (
+          {filteredAssets.map((asset) => (
             <div
               key={asset.id}
               style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", cursor: "pointer", transition: "border-color .15s" }}
