@@ -836,30 +836,222 @@ function AIWriterPage() {
 }
 
 function AssetLibraryPage() {
+  const [assets, setAssets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [viewMode, setViewMode] = useState("grid"); // grid | list
+  const [filterType, setFilterType] = useState("all");
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    const fetchAssets = async () => {
+      try {
+        const supabase = createClient();
+        let query = supabase
+          .from("assets")
+          .select("id, name, type, mime_type, file_url, file_size_bytes, duration_seconds, width, height, source, is_favorite, created_at")
+          .order("created_at", { ascending: false });
+
+        if (filterType !== "all") query = query.eq("type", filterType);
+        if (search.trim()) query = query.ilike("name", `%${search.trim()}%`);
+
+        const { data, error } = await query;
+        if (error) throw error;
+        if (data) setAssets(data);
+      } catch (err) {
+        console.error("[asset-library] fetch error:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchAssets();
+  }, [filterType, search]);
+
+  const formatSize = (bytes) => {
+    if (!bytes) return "—";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const formatDuration = (secs) => {
+    if (!secs) return null;
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+
+  const typeIcon = (type) => {
+    if (type === "image")    return icons.image;
+    if (type === "video")    return icons.video;
+    if (type === "audio")    return icons.zap;
+    if (type === "document") return icons.writer;
+    return icons.library;
+  };
+
+  const typeColor = (type) => {
+    if (type === "image")    return "var(--accent)";
+    if (type === "video")    return "#4E9BF4";
+    if (type === "audio")    return "var(--accent2)";
+    if (type === "document") return "var(--accent3)";
+    return "var(--text-dim)";
+  };
+
+  const typeBg = (type) => {
+    if (type === "image")    return "rgba(124,110,248,.15)";
+    if (type === "video")    return "rgba(78,155,244,.15)";
+    if (type === "audio")    return "rgba(79,209,160,.15)";
+    if (type === "document") return "rgba(244,149,92,.15)";
+    return "rgba(107,112,128,.15)";
+  };
+
+  const isImage = (asset) => asset.type === "image" && asset.file_url;
+  const isVideo = (asset) => asset.type === "video" && asset.file_url;
+
+  const FILTERS = ["all", "image", "video", "audio", "document"];
+
   return (
     <div className="page">
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 24, alignItems: "center" }}>
-        <div className="tabs">
-          {["All", "Images", "Videos", "Audio", "Documents"].map((t, i) => (
-            <div key={t} className={`tab${i === 0 ? " active" : ""}`}>{t}</div>
+      {/* Toolbar */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 20, alignItems: "center", flexWrap: "wrap" }}>
+        {/* Filter tabs */}
+        <div className="tabs" style={{ marginBottom: 0 }}>
+          {FILTERS.map((f) => (
+            <div
+              key={f}
+              className={`tab${filterType === f ? " active" : ""}`}
+              onClick={() => { setFilterType(f); setLoading(true); }}
+              style={{ textTransform: "capitalize" }}
+            >
+              {f === "all" ? "All" : f}
+            </div>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-ghost"><Icon d={icons.upload} size={14} /> Upload</button>
-          <button className="btn btn-primary"><Icon d={icons.plus} size={14} /> Add asset</button>
+
+        {/* Search */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--card)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", padding: "7px 12px", flex: 1, minWidth: 160 }}>
+          <Icon d={icons.search} size={14} />
+          <input
+            value={search}
+            onChange={e => { setSearch(e.target.value); setLoading(true); }}
+            placeholder="Search assets…"
+            style={{ background: "transparent", border: "none", outline: "none", color: "var(--text)", fontSize: 13, width: "100%", fontFamily: "inherit" }}
+          />
+        </div>
+
+        {/* View toggle */}
+        <div style={{ display: "flex", gap: 4 }}>
+          {["grid", "list"].map((v) => (
+            <button
+              key={v}
+              className="btn-icon"
+              onClick={() => setViewMode(v)}
+              style={{ background: viewMode === v ? "var(--accent)" : "var(--card)", color: viewMode === v ? "#fff" : "var(--text-mid)", border: "1px solid var(--border)" }}
+            >
+              <Icon d={v === "grid" ? icons.layers : icons.menu} size={15} />
+            </button>
+          ))}
         </div>
       </div>
 
-      <EmptyState
-        icon="library"
-        title="Your asset library is empty"
-        desc="Upload images, videos, audio files, and documents to keep everything in one place."
-        action="Upload assets"
-      />
+      {/* Content */}
+      {loading ? (
+        viewMode === "grid" ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12 }}>
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="skeleton" style={{ height: 160, borderRadius: "var(--r-lg)" }} />
+            ))}
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="skeleton" style={{ height: 56, borderRadius: "var(--r-md)" }} />
+            ))}
+          </div>
+        )
+      ) : assets.length === 0 ? (
+        <EmptyState
+          icon="library"
+          title={search ? "No assets found" : filterType !== "all" ? `No ${filterType}s yet` : "Your asset library is empty"}
+          desc={search ? `No results for "${search}". Try a different keyword.` : "Assets will appear here once you upload files or generate content with AI."}
+        />
+      ) : viewMode === "grid" ? (
+        /* Grid view */
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12 }}>
+          {assets.map((asset) => (
+            <div
+              key={asset.id}
+              style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: "var(--r-lg)", overflow: "hidden", cursor: "pointer", transition: "border-color .15s" }}
+              onMouseEnter={e => e.currentTarget.style.borderColor = "var(--accent)"}
+              onMouseLeave={e => e.currentTarget.style.borderColor = "var(--border)"}
+            >
+              {/* Thumbnail */}
+              <div style={{ height: 110, background: "var(--surface)", display: "flex", alignItems: "center", justifyContent: "center", position: "relative", overflow: "hidden" }}>
+                {isImage(asset) ? (
+                  <img src={asset.file_url} alt={asset.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : isVideo(asset) ? (
+                  <video src={asset.file_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted playsInline />
+                ) : (
+                  <div style={{ width: 40, height: 40, borderRadius: "var(--r-md)", background: typeBg(asset.type), color: typeColor(asset.type), display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <Icon d={typeIcon(asset.type)} size={20} />
+                  </div>
+                )}
+                {/* Duration badge for video/audio */}
+                {formatDuration(asset.duration_seconds) && (
+                  <div style={{ position: "absolute", bottom: 6, right: 6, background: "rgba(0,0,0,.7)", color: "#fff", fontSize: 10, fontWeight: 600, padding: "2px 6px", borderRadius: 4 }}>
+                    {formatDuration(asset.duration_seconds)}
+                  </div>
+                )}
+                {/* Type badge */}
+                <div style={{ position: "absolute", top: 6, left: 6, background: typeBg(asset.type), color: typeColor(asset.type), fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 4, textTransform: "uppercase", letterSpacing: ".04em" }}>
+                  {asset.type}
+                </div>
+              </div>
+              {/* Info */}
+              <div style={{ padding: "10px 12px" }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.name}</div>
+                <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3 }}>{formatSize(asset.file_size_bytes)}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        /* List view */
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {assets.map((asset) => (
+            <div
+              key={asset.id}
+              style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", cursor: "pointer", transition: "border-color .15s" }}
+              onMouseEnter={e => e.currentTarget.style.borderColor = "var(--accent)"}
+              onMouseLeave={e => e.currentTarget.style.borderColor = "var(--border)"}
+            >
+              {/* Thumb / icon */}
+              <div style={{ width: 40, height: 40, borderRadius: "var(--r-sm)", flexShrink: 0, overflow: "hidden", background: "var(--surface)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {isImage(asset) ? (
+                  <img src={asset.file_url} alt={asset.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : (
+                  <div style={{ color: typeColor(asset.type) }}>
+                    <Icon d={typeIcon(asset.type)} size={18} />
+                  </div>
+                )}
+              </div>
+              {/* Name + meta */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.name}</div>
+                <div style={{ display: "flex", gap: 8, marginTop: 2, alignItems: "center" }}>
+                  <span style={{ fontSize: 11, color: typeColor(asset.type), fontWeight: 500, textTransform: "capitalize" }}>{asset.type}</span>
+                  {asset.source && <><span style={{ fontSize: 11, color: "var(--text-dim)" }}>·</span><span style={{ fontSize: 11, color: "var(--text-dim)" }}>{asset.source}</span></>}
+                  {formatDuration(asset.duration_seconds) && <><span style={{ fontSize: 11, color: "var(--text-dim)" }}>·</span><span style={{ fontSize: 11, color: "var(--text-dim)" }}>{formatDuration(asset.duration_seconds)}</span></>}
+                </div>
+              </div>
+              {/* Size */}
+              <div style={{ fontSize: 12, color: "var(--text-dim)", flexShrink: 0 }}>{formatSize(asset.file_size_bytes)}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
-
 function WorkflowPage() {
   return (
     <div className="page">
