@@ -302,6 +302,68 @@ function SectionHeader({ title, action, onAction }) {
 // ── Pages ──────────────────────────────────────────────────────────────────────
 
 function DashboardPage() {
+  const [stats, setStats] = useState({ projects: 0, clips: 0 });
+  const [recentProjects, setRecentProjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchDashboard = async () => {
+      try {
+        const supabase = createClient();
+
+        // Fetch semua sekaligus
+        const [projectsRes, clipsRes, recentRes] = await Promise.all([
+          supabase.from("projects").select("id", { count: "exact", head: true }),
+          supabase.from("clips").select("id", { count: "exact", head: true }),
+          supabase.from("projects")
+            .select("id, title, status, current_step, source_url, created_at")
+            .order("created_at", { ascending: false })
+            .limit(5),
+        ]);
+
+        setStats({
+          projects: projectsRes.count || 0,
+          clips:    clipsRes.count    || 0,
+        });
+
+        if (recentRes.data) setRecentProjects(recentRes.data);
+      } catch (err) {
+        console.error("[dashboard] fetch error:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchDashboard();
+  }, []);
+
+  const statusColor = (status) => {
+    if (status === "completed") return "var(--accent2)";
+    if (status === "failed")    return "var(--danger)";
+    if (status === "processing" || status === "queued") return "var(--accent)";
+    return "var(--text-dim)";
+  };
+
+  const statusLabel = (status, current_step) => {
+    if (status === "completed")  return "Completed";
+    if (status === "failed")     return "Failed";
+    if (status === "queued")     return "Queued";
+    if (status === "processing" && current_step) return current_step.replace(/_/g, " ");
+    if (status === "processing") return "Processing";
+    return status || "Pending";
+  };
+
+  const timeAgo = (dateStr) => {
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const mins  = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days  = Math.floor(diff / 86400000);
+    if (mins < 1)   return "just now";
+    if (mins < 60)  return `${mins}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    return `${days}d ago`;
+  };
+
   return (
     <div className="page">
       <div style={{ marginBottom: 24 }}>
@@ -314,10 +376,30 @@ function DashboardPage() {
       {/* Stats */}
       <div className="stats-grid">
         {[
-          { label: "Total Assets",    value: "0",    sub: "No assets yet",        cls: "" },
-          { label: "Videos Created",  value: "0",    sub: "Start your first one", cls: "" },
-          { label: "AI Words Used",   value: "0",    sub: "Out of 100k / mo",     cls: "warn" },
-          { label: "Workflows Run",   value: "0",    sub: "No runs yet",          cls: "" },
+          {
+            label: "Total Clips",
+            value: loading ? "—" : String(stats.clips),
+            sub:   stats.clips > 0 ? `from ${stats.projects} project${stats.projects !== 1 ? "s" : ""}` : "No clips yet",
+            cls:   "",
+          },
+          {
+            label: "Videos Created",
+            value: loading ? "—" : String(stats.projects),
+            sub:   stats.projects > 0 ? "Auto Clipper projects" : "Start your first one",
+            cls:   "",
+          },
+          {
+            label: "AI Words Used",
+            value: "0",
+            sub:   "Out of 100k / mo",
+            cls:   "warn",
+          },
+          {
+            label: "Workflows Run",
+            value: "0",
+            sub:   "No runs yet",
+            cls:   "",
+          },
         ].map((s) => (
           <div key={s.label} className="stat-card">
             <div className="stat-label">{s.label}</div>
@@ -331,10 +413,10 @@ function DashboardPage() {
       <SectionHeader title="Quick actions" />
       <div className="quick-actions">
         {[
-          { icon: "image",    color: "#7C6EF8", bg: "rgba(124,110,248,.15)", title: "New image",    desc: "Generate or edit" },
-          { icon: "video",    color: "#4E9BF4", bg: "rgba(78,155,244,.15)",  title: "New video",    desc: "Create from scratch" },
+          { icon: "image",    color: "#7C6EF8", bg: "rgba(124,110,248,.15)", title: "New image",     desc: "Generate or edit" },
+          { icon: "video",    color: "#4E9BF4", bg: "rgba(78,155,244,.15)",  title: "New video",     desc: "Create from scratch" },
           { icon: "writer",   color: "#4FD1A0", bg: "rgba(79,209,160,.15)",  title: "Write content", desc: "Blog, captions, scripts" },
-          { icon: "workflow", color: "#F4955C", bg: "rgba(244,149,92,.15)",  title: "New workflow", desc: "Automate tasks" },
+          { icon: "workflow", color: "#F4955C", bg: "rgba(244,149,92,.15)",  title: "New workflow",  desc: "Automate tasks" },
         ].map((q) => (
           <div key={q.title} className="quick-action">
             <div className="qa-icon" style={{ background: q.bg, color: q.color }}>
@@ -352,13 +434,37 @@ function DashboardPage() {
       <div className="two-col">
         {/* Recent activity */}
         <div className="card">
-          <SectionHeader title="Recent activity" />
-          <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "20px 0", textAlign: "center" }}>
-            Activity will appear here once you start creating.
-          </div>
+          <SectionHeader title="Recent projects" />
+          {loading ? (
+            <LoadingSkeleton />
+          ) : recentProjects.length === 0 ? (
+            <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "20px 0", textAlign: "center" }}>
+              No projects yet. Go to Auto Clipper to start.
+            </div>
+          ) : (
+            <div>
+              {recentProjects.map((p) => (
+                <div key={p.id} className="activity-item">
+                  <div className="activity-dot" style={{ background: statusColor(p.status) }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="activity-text">
+                      <strong>{p.title || "Untitled"}</strong>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center" }}>
+                      <span style={{ fontSize: 11, color: statusColor(p.status), fontWeight: 500, textTransform: "capitalize" }}>
+                        {statusLabel(p.status, p.current_step)}
+                      </span>
+                      <span style={{ fontSize: 11, color: "var(--text-dim)" }}>·</span>
+                      <span className="activity-time">{timeAgo(p.created_at)}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
-        {/* Storage */}
+        {/* Storage — static sampai Phase 4 */}
         <div className="card">
           <SectionHeader title="Storage" />
           <div style={{ marginBottom: 16 }}>
@@ -387,7 +493,6 @@ function DashboardPage() {
     </div>
   );
 }
-
 function ImageStudioPage() {
   return (
     <div className="page">
