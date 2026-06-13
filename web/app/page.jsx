@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { createClient } from "@/lib/supabase";
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
 const Icon = ({ d, size = 20, stroke = "currentColor" }) => (
@@ -462,57 +463,230 @@ function VideoStudioPage() {
     </div>
   );
 }
-
 function AutoClipperPage() {
+  const [url, setUrl] = useState("");
+  const [submitState, setSubmitState] = useState("idle"); // idle | loading | polling | completed | failed
+  const [projectId, setProjectId] = useState(null);
+  const [currentStep, setCurrentStep] = useState(null);
+  const [clips, setClips] = useState([]);
+  const [errorMsg, setErrorMsg] = useState(null);
+  const channelRef = useRef(null);
+
+  const STEPS = [
+    { key: "downloading",        label: "Downloading video" },
+    { key: "finding_candidates", label: "Finding candidates" },
+    { key: "transcribing",       label: "Transcribing audio" },
+    { key: "ranking",            label: "Ranking clips with AI" },
+    { key: "exporting",          label: "Exporting clips" },
+    { key: "uploading",          label: "Uploading to storage" },
+  ];
+
+  const unsubscribe = useCallback(() => {
+    if (channelRef.current) {
+      channelRef.current.unsubscribe();
+      channelRef.current = null;
+    }
+  }, []);
+
+  const fetchClips = useCallback(async (pid) => {
+    const supabase = createClient();
+    const { data } = await supabase
+      .from("clips")
+      .select("id, clip_index, title, duration, file_url, thumbnail_url, start_time, end_time")
+      .eq("project_id", pid)
+      .order("clip_index", { ascending: true });
+    if (data) setClips(data);
+  }, []);
+
+  const startRealtime = useCallback((pid) => {
+    const supabase = createClient();
+    const channel = supabase
+      .channel(`project-${pid}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "projects", filter: `id=eq.${pid}` },
+        (payload) => {
+          const { status, current_step, error_message } = payload.new;
+          if (current_step) setCurrentStep(current_step);
+          if (status === "completed") {
+            setSubmitState("completed");
+            setCurrentStep(null);
+            fetchClips(pid);
+            unsubscribe();
+          } else if (status === "failed") {
+            setSubmitState("failed");
+            setErrorMsg(error_message || "Pipeline gagal. Coba lagi.");
+            unsubscribe();
+          }
+        }
+      )
+      .subscribe();
+    channelRef.current = channel;
+  }, [fetchClips, unsubscribe]);
+
+  useEffect(() => { return () => unsubscribe(); }, [unsubscribe]);
+
+  const handleSubmit = async () => {
+    if (!url.trim()) return;
+    setSubmitState("loading");
+    setErrorMsg(null);
+    setClips([]);
+    setCurrentStep(null);
+    try {
+      const res = await fetch("/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ youtube_url: url.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSubmitState("failed");
+        setErrorMsg(data.error || "Gagal submit. Coba lagi.");
+        return;
+      }
+      setProjectId(data.project_id);
+      setSubmitState("polling");
+      startRealtime(data.project_id);
+    } catch {
+      setSubmitState("failed");
+      setErrorMsg("Network error. Coba lagi.");
+    }
+  };
+
+  const handleReset = () => {
+    unsubscribe();
+    setUrl("");
+    setSubmitState("idle");
+    setProjectId(null);
+    setCurrentStep(null);
+    setClips([]);
+    setErrorMsg(null);
+  };
+
+  const isBusy = submitState === "loading" || submitState === "polling";
+
   return (
     <div className="page">
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 18, fontWeight: 700, color: "var(--white)", marginBottom: 6 }}>Auto Clipper</div>
-        <div style={{ fontSize: 13, color: "var(--text-dim)" }}>Upload long-form videos and let AI clip highlights automatically.</div>
+        <div style={{ fontSize: 13, color: "var(--text-dim)" }}>Paste a YouTube URL and let AI clip the highlights automatically.</div>
       </div>
 
-      <div className="two-col" style={{ marginBottom: 20 }}>
-        <div className="card" style={{ borderStyle: "dashed", cursor: "pointer", borderColor: "var(--muted)" }}>
-          <div style={{ textAlign: "center", padding: "40px 20px", color: "var(--text-dim)" }}>
-            <div style={{ marginBottom: 12 }}><Icon d={icons.upload} size={28} /></div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-mid)", marginBottom: 4 }}>Drop your video here</div>
-            <div style={{ fontSize: 12 }}>MP4, MOV, or WebM · up to 2GB</div>
-            <button className="btn btn-ghost" style={{ marginTop: 16 }}>Browse files</button>
-          </div>
+      {/* Input card */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <SectionHeader title="YouTube URL" />
+        <div style={{ display: "flex", gap: 10 }}>
+          <input
+            className="form-input"
+            placeholder="https://www.youtube.com/watch?v=..."
+            value={url}
+            onChange={e => setUrl(e.target.value)}
+            disabled={isBusy}
+            onKeyDown={e => e.key === "Enter" && !isBusy && handleSubmit()}
+            style={{ flex: 1 }}
+          />
+          {(submitState === "idle" || submitState === "failed") && (
+            <button className="btn btn-primary" onClick={handleSubmit} disabled={!url.trim()} style={{ opacity: !url.trim() ? 0.5 : 1 }}>
+              <Icon d={icons.zap} size={14} /> Start clipping
+            </button>
+          )}
+          {submitState === "completed" && (
+            <button className="btn btn-ghost" onClick={handleReset}>
+              <Icon d={icons.plus} size={14} /> New clip
+            </button>
+          )}
+          {(submitState === "loading" || submitState === "polling") && (
+            <button className="btn btn-ghost" onClick={handleReset} disabled={submitState === "loading"}>
+              Cancel
+            </button>
+          )}
         </div>
+        {submitState === "failed" && errorMsg && (
+          <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: "var(--r-md)", background: "rgba(240,96,112,.1)", border: "1px solid rgba(240,96,112,.2)", color: "var(--danger)", fontSize: 13 }}>
+            ⚠️ {errorMsg}
+          </div>
+        )}
+      </div>
 
-        <div className="card">
-          <SectionHeader title="Clip settings" />
-          <div className="form-group">
-            <label className="form-label">Target clip length</label>
-            <select className="form-input">
-              <option>15 seconds</option>
-              <option>30 seconds</option>
-              <option>60 seconds</option>
-              <option>Custom</option>
-            </select>
+      {/* Progress card */}
+      {submitState === "polling" && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <SectionHeader title="Processing…" />
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {STEPS.map((step) => {
+              const idx     = STEPS.findIndex(s => s.key === currentStep);
+              const thisIdx = STEPS.findIndex(s => s.key === step.key);
+              const isDone  = idx > thisIdx;
+              const isActive = currentStep === step.key;
+              return (
+                <div key={step.key} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{
+                    width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: isDone ? "rgba(79,209,160,.15)" : isActive ? "rgba(124,110,248,.2)" : "var(--surface)",
+                    border: `1px solid ${isDone ? "var(--accent2)" : isActive ? "var(--accent)" : "var(--border)"}`,
+                  }}>
+                    {isDone
+                      ? <Icon d={icons.check} size={11} stroke="var(--accent2)" />
+                      : <div style={{ width: 7, height: 7, borderRadius: "50%", background: isActive ? "var(--accent)" : "var(--border)" }} />
+                    }
+                  </div>
+                  <span style={{ fontSize: 13, color: isDone ? "var(--accent2)" : isActive ? "var(--text)" : "var(--text-dim)", fontWeight: isActive ? 500 : 400 }}>
+                    {step.label}
+                  </span>
+                </div>
+              );
+            })}
           </div>
-          <div className="form-group">
-            <label className="form-label">Number of clips</label>
-            <input className="form-input" type="number" defaultValue={5} min={1} max={20} />
+          <div className="progress-bar" style={{ marginTop: 20 }}>
+            <div className="progress-fill" style={{
+              width: currentStep ? `${Math.round(((STEPS.findIndex(s => s.key === currentStep) + 1) / STEPS.length) * 100)}%` : "5%",
+              transition: "width 0.6s ease",
+            }} />
           </div>
-          <div className="form-group">
-            <label className="form-label">Focus on</label>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {["Action", "Speech", "Emotion", "Auto"].map((t, i) => (
-                <span key={t} className={`tag ${i === 3 ? "tag-purple" : "tag-orange"}`} style={{ cursor: "pointer" }}>{t}</span>
-              ))}
+          {projectId && (
+            <div style={{ marginTop: 10, fontSize: 11, color: "var(--text-dim)" }}>
+              Project ID: <code style={{ color: "var(--text-mid)" }}>{projectId}</code>
             </div>
-          </div>
-          <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", opacity: .5 }} disabled>
-            <Icon d={icons.zap} size={14} /> Start clipping
-          </button>
+          )}
         </div>
-      </div>
+      )}
 
+      {/* Clips result */}
       <div className="card">
         <SectionHeader title="Generated clips" />
-        <EmptyState icon="clip" title="No clips yet" desc="Upload a video and configure settings to generate highlight clips." />
+        {submitState === "completed" && clips.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {clips.map((clip) => (
+              <div key={clip.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--r-md)" }}>
+                <div style={{ width: 80, height: 48, borderRadius: "var(--r-sm)", flexShrink: 0, background: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                  {clip.thumbnail_url
+                    ? <img src={clip.thumbnail_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : <Icon d={icons.clip} size={20} stroke="var(--text-dim)" />
+                  }
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text)", marginBottom: 2 }}>{clip.title || `Clip ${clip.clip_index}`}</div>
+                  <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                    {clip.duration ? `${Math.round(clip.duration)}s` : "—"}
+                    {clip.start_time != null && clip.end_time != null
+                      ? ` · ${Math.floor(clip.start_time / 60)}:${String(Math.round(clip.start_time % 60)).padStart(2, "0")} → ${Math.floor(clip.end_time / 60)}:${String(Math.round(clip.end_time % 60)).padStart(2, "0")}`
+                      : ""}
+                  </div>
+                </div>
+                {clip.file_url && (
+                  <a href={clip.file_url} target="_blank" rel="noopener noreferrer" className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px", textDecoration: "none" }}>
+                    <Icon d={icons.externalLink} size={13} /> Open
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : submitState === "completed" ? (
+          <EmptyState icon="clip" title="Selesai tapi tidak ada clips" desc="Pipeline selesai tapi tidak ada clips yang digenerate." />
+        ) : (
+          <EmptyState icon="clip" title="No clips yet" desc="Paste a YouTube URL above and hit Start clipping." />
+        )}
       </div>
     </div>
   );
