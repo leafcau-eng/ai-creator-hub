@@ -493,13 +493,6 @@ function DashboardPage({ onOpenProject }) {
     </div>
   );
 }
-// ============================================================
-// REPLACE fungsi ImageStudioPage() yang ada di page.jsx
-// (dari baris `function ImageStudioPage() {` sampai closing `}` sebelum `function VideoStudioPage`)
-//
-// PASTE seluruh blok ini sebagai pengganti fungsi tersebut.
-// ============================================================
-
 function ImageStudioPage() {
   // ── State ──────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState("generate"); // "generate" | "history" | "edit"
