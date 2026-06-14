@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
     const updateData: any = {
       status,
       error_message: error_message || null,
-      completed_at: status === 'completed' ? new Date().toISOString() : null,
+      completed_at: status === "done" ? new Date().toISOString() : null,
     }
 
     if (current_step) {
@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    if (status === 'completed') {
+    if (status === "done") {
       await sendTelegram(
         `✅ <b>Project Selesai!</b>\n\n` +
         `📁 <b>${projectTitle}</b>\n` +
