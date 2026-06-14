@@ -55,10 +55,12 @@ export async function POST(req: NextRequest) {
       updateData.current_step = current_step
     }
 
-    await supabase
+    const { error: updateError } = await supabase
       .from('projects')
       .update(updateData)
       .eq('id', project_id)
+      if (updateError) console.error('[webhook] update error:', JSON.stringify(updateError))
+      else console.log('[webhook] update ok:', status)
 
     if (clips && clips.length > 0) {
       const clipsToInsert = clips.map((clip: any, i: number) => ({
