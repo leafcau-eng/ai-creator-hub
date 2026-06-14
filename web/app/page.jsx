@@ -1650,6 +1650,55 @@ const pages = {
 
 // ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
+  const [currentUser, setCurrentUser] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+
+    (async () => {
+      try {
+        const supabase = createClient();
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        if (authError || !authData?.user) return;
+
+        const authUser = authData.user;
+        let profile = null;
+
+        try {
+          const { data: profileData } = await supabase
+            .from("profiles")
+            .select("full_name, avatar_url")
+            .eq("id", authUser.id)
+            .maybeSingle();
+          profile = profileData || null;
+        } catch (_) {
+          profile = null; // tabel profiles tidak ada / query gagal -> fallback ke auth
+        }
+
+        const email = authUser.email || "";
+        const fallbackName = email.includes("@") ? email.split("@")[0] : "User";
+
+        const displayName =
+          profile?.full_name ||
+          authUser.user_metadata?.full_name ||
+          fallbackName;
+
+        const avatarUrl =
+          profile?.avatar_url ||
+          authUser.user_metadata?.avatar_url ||
+          null;
+
+        if (active) {
+          setCurrentUser({ displayName, avatarUrl, email });
+        }
+      } catch (_) {
+        // diam-diam gagal -> sidebar tetap pakai fallback default
+      }
+    })();
+
+    return () => { active = false; };
+  }, []);
+
   const [active, setActive] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
 
@@ -1689,14 +1738,25 @@ export default function App() {
           {/* Footer */}
           <div className="sidebar-footer">
             <div className="user-row">
-              <div className="avatar">A</div>
-              {!collapsed && (
-                <div>
-                  <div className="user-name">Your Name</div>
-                  <div className="user-role">Free plan</div>
-                </div>
-              )}
-            </div>
+              {currentUser?.avatarUrl ? (
+              <img
+                src={currentUser.avatarUrl}
+                alt={currentUser.displayName || "User"}
+                className="avatar"
+                style={{ objectFit: "cover" }}
+              />
+            ) : (
+              <div className="avatar">
+                {(currentUser?.displayName || "U").charAt(0).toUpperCase()}
+              </div>
+            )}
+            {!collapsed && (
+              <div>
+                <div className="user-name">{currentUser?.displayName || "Guest"}</div>
+                <div className="user-role">{currentUser?.email || "Free plan"}</div>
+              </div>
+            )}
+          </div>
           </div>
         </aside>
 
