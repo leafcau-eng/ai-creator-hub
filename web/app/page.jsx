@@ -1435,8 +1435,17 @@ function AssetLibraryPage() {
                 ) : u.status === "done" ? (
                   <span style={{ fontSize: 11, color: "var(--accent2)", fontWeight: 600 }}>Done</span>
                 ) : (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{u.progress}%</span>
-                )}
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: 11, padding: "3px 10px" }}
+                    onClick={() => cancelUpload(u.id)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
               </div>
               <div className="progress-bar">
                 <div
