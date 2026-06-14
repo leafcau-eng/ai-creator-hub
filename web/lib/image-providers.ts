@@ -46,7 +46,7 @@ function buildPrompt(params: GenerateImageParams): string {
 // ── Gemini Imagen 3 ──────────────────────────────────────────────────────────
 // Docs: https://ai.google.dev/api/generate-images
 
-const GEMINI_IMAGE_MODEL    = "imagen-3.0-generate-002";
+const GEMINI_IMAGE_MODEL    = "imagen-4.0-generate-001";
 const GEMINI_IMAGE_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 export async function callGeminiImagen(
