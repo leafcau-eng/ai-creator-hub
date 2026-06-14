@@ -613,7 +613,7 @@ function AutoClipperPage() {
         (payload) => {
           const { status, current_step, error_message } = payload.new;
           if (current_step) setCurrentStep(current_step);
-          if (status === "completed") {
+          if (status === "done") {
             setSubmitState("completed");
             setCurrentStep(null);
             fetchClips(pid);
