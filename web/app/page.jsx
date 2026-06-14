@@ -301,7 +301,7 @@ function SectionHeader({ title, action, onAction }) {
 
 // ── Pages ──────────────────────────────────────────────────────────────────────
 
-function DashboardPage() {
+function DashboardPage({ onOpenProject }) {
   const [stats, setStats] = useState({ projects: 0, clips: 0 });
   const [recentProjects, setRecentProjects] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -444,7 +444,7 @@ function DashboardPage() {
           ) : (
             <div>
               {recentProjects.map((p) => (
-                <div key={p.id} className="activity-item">
+                <div key={p.id} className="activity-item" onClick={() => onOpenProject && onOpenProject(p.id)} style={{ cursor: onOpenProject ? "pointer" : "default" }}>
                   <div className="activity-dot" style={{ background: statusColor(p.status) }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="activity-text">
@@ -568,7 +568,7 @@ function VideoStudioPage() {
     </div>
   );
 }
-function AutoClipperPage() {
+function AutoClipperPage({ initialProjectId }) {
   const [url, setUrl] = useState("");
   const [submitState, setSubmitState] = useState("idle"); // idle | loading | polling | completed | failed
   const [projectId, setProjectId] = useState(null);
@@ -628,6 +628,32 @@ function AutoClipperPage() {
       .subscribe();
     channelRef.current = channel;
   }, [fetchClips, unsubscribe]);
+
+  // Load existing project jika dibuka dari dashboard
+  useEffect(() => {
+    if (!initialProjectId) return;
+    const supabase = createClient();
+    (async () => {
+      const { data } = await supabase
+        .from("projects")
+        .select("id, status, current_step")
+        .eq("id", initialProjectId)
+        .single();
+      if (!data) return;
+      setProjectId(data.id);
+      if (data.status === "done") {
+        setSubmitState("done");
+        fetchClips(data.id);
+      } else if (data.status === "processing" || data.status === "queued") {
+        setSubmitState("polling");
+        if (data.current_step) setCurrentStep(data.current_step);
+        startRealtime(data.id);
+      } else if (data.status === "failed") {
+        setSubmitState("failed");
+        setErrorMsg("Pipeline gagal.");
+      }
+    })();
+  }, [initialProjectId, fetchClips, startRealtime]);
 
   useEffect(() => { return () => unsubscribe(); }, [unsubscribe]);
 
@@ -1743,8 +1769,19 @@ export default function App() {
 
   const [active, setActive] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
+  const [clipperProjectId, setClipperProjectId] = useState(null);
+
+  const navigateToClipper = (projectId = null) => {
+    setClipperProjectId(projectId);
+    setActive("clipper");
+  };
 
   const { title, component: Page } = pages[active];
+  const pageProps = active === "dashboard"
+    ? { onOpenProject: navigateToClipper }
+    : active === "clipper"
+    ? { initialProjectId: clipperProjectId }
+    : {};
 
   return (
     <>
@@ -1830,7 +1867,7 @@ export default function App() {
 
           {/* Page content */}
           <main className="content">
-            <Page key={active} />
+            <Page key={active} {...pageProps} />
           </main>
         </div>
       </div>
