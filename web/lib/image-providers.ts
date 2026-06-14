@@ -1,7 +1,7 @@
 // lib/image-providers.ts
-// Phase 6: Image generation — Gemini Imagen 3 → OpenRouter (FLUX fallback)
+// Phase 6: Image generation — Gemini Flash Image (generateContent) → fallback
 
-export type ImageProviderName = "gemini-imagen" | "openrouter-flux";
+export type ImageProviderName = "gemini-flash-image" | "openrouter-flux";
 
 export interface GenerateImageParams {
   prompt: string;
@@ -26,94 +26,90 @@ export interface GenerateImageResult {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Map "16:9" → Gemini aspectRatio string */
-function toGeminiRatio(ratio: string | undefined): string {
-  const map: Record<string, string> = {
-    "1:1":  "1:1",
-    "16:9": "16:9",
-    "9:16": "9:16",
-    "4:3":  "4:3",
-  };
-  return map[ratio ?? "1:1"] ?? "1:1";
-}
-
-/** Build an enriched prompt from style + prompt */
+/** Build enriched prompt dari style + prompt + aspect ratio hint */
 function buildPrompt(params: GenerateImageParams): string {
   const stylePart = params.style ? `${params.style} style, ` : "";
-  return `${stylePart}${params.prompt}`.trim();
+  const negPart   = params.negativePrompt ? ` Avoid: ${params.negativePrompt}.` : "";
+  const ratioPart = params.aspectRatio && params.aspectRatio !== "1:1"
+    ? ` Aspect ratio ${params.aspectRatio}.`
+    : "";
+  return `${stylePart}${params.prompt}${negPart}${ratioPart}`.trim();
 }
 
-// ── Gemini Imagen 3 ──────────────────────────────────────────────────────────
-// Docs: https://ai.google.dev/api/generate-images
+// ── Gemini Flash Image — generateContent endpoint ────────────────────────────
+// Model: gemini-2.5-flash-image (gratis, tidak perlu paid plan)
+// Docs: https://ai.google.dev/gemini-api/docs/image-generation
 
-const GEMINI_IMAGE_MODEL    = "imagen-4.0-generate-001";
+const GEMINI_IMAGE_MODEL    = "gemini-2.5-flash-image";
 const GEMINI_IMAGE_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
-export async function callGeminiImagen(
+export async function callGeminiFlashImage(
   params: GenerateImageParams
 ): Promise<GenerateImageResult> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
+  const count = Math.min(params.numOutputs ?? 1, 4);
+  const allImages: GeneratedImage[] = [];
 
-  let res: Response;
-  try {
-    res = await fetch(
-      `${GEMINI_IMAGE_API_BASE}/${GEMINI_IMAGE_MODEL}:predict?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          instances: [
-            {
-              prompt: buildPrompt(params),
-              ...(params.negativePrompt
-                ? { negativePrompt: params.negativePrompt }
-                : {}),
+  // generateContent hanya bisa 1 gambar per request — loop untuk numOutputs > 1
+  for (let i = 0; i < count; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+
+    let res: Response;
+    try {
+      res = await fetch(
+        `${GEMINI_IMAGE_API_BASE}/${GEMINI_IMAGE_MODEL}:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [{ text: buildPrompt(params) }],
+              },
+            ],
+            generationConfig: {
+              responseModalities: ["IMAGE", "TEXT"],
             },
-          ],
-          parameters: {
-            sampleCount: Math.min(params.numOutputs ?? 1, 4),
-            aspectRatio: toGeminiRatio(params.aspectRatio),
-            // safetySetting: "block_only_high",
-          },
-        }),
-        signal: controller.signal,
+          }),
+          signal: controller.signal,
+        }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error("GEMINI FLASH IMAGE STATUS:", res.status);
+      console.error("GEMINI FLASH IMAGE ERROR:", errBody);
+      throw new Error(`Gemini Flash Image error ${res.status}: ${errBody}`);
+    }
+
+    const data = await res.json();
+
+    // Response: candidates[0].content.parts[] — cari part dengan inlineData
+    const parts = data?.candidates?.[0]?.content?.parts ?? [];
+    for (const part of parts) {
+      if (part.inlineData?.data) {
+        allImages.push({
+          base64:   part.inlineData.data,
+          mimeType: part.inlineData.mimeType ?? "image/png",
+        });
       }
-    );
-  } finally {
-    clearTimeout(timer);
+    }
   }
 
-  if (!res.ok) {
-    const errBody = await res.text();
-    console.error("GEMINI IMAGEN STATUS:", res.status);
-    console.error("GEMINI IMAGEN ERROR:", errBody);
-    throw new Error(`Gemini Imagen error ${res.status}: ${errBody}`);
+  if (allImages.length === 0) {
+    throw new Error("Gemini Flash Image returned no images");
   }
 
-  const data = await res.json();
-
-  // Response shape: { predictions: [{ bytesBase64Encoded, mimeType }] }
-  const predictions: Array<{ bytesBase64Encoded: string; mimeType: string }> =
-    data?.predictions ?? [];
-
-  if (!predictions.length) {
-    throw new Error("Gemini Imagen returned no images");
-  }
-
-  const images: GeneratedImage[] = predictions.map((p) => ({
-    base64:   p.bytesBase64Encoded,
-    mimeType: p.mimeType ?? "image/png",
-  }));
-
-  return { images, providerName: "gemini-imagen", modelName: GEMINI_IMAGE_MODEL };
+  return { images: allImages, providerName: "gemini-flash-image", modelName: GEMINI_IMAGE_MODEL };
 }
 
 // ── OpenRouter — FLUX.1 Schnell (fallback) ───────────────────────────────────
-// Via OpenRouter image generation endpoint
 
 const OPENROUTER_IMAGE_MODEL    = "black-forest-labs/FLUX.1-schnell";
 const OPENROUTER_IMAGE_API_BASE = "https://openrouter.ai/api/v1/images/generations";
@@ -124,7 +120,6 @@ export async function callOpenRouterFlux(
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
 
-  // Map aspect ratio to width/height for OpenRouter
   const sizeMap: Record<string, string> = {
     "1:1":  "1024x1024",
     "16:9": "1344x768",
@@ -135,7 +130,7 @@ export async function callOpenRouterFlux(
   const n    = Math.min(params.numOutputs ?? 1, 4);
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000); // FLUX can be slow
+  const timer = setTimeout(() => controller.abort(), 60000);
 
   let res: Response;
   try {
@@ -167,8 +162,6 @@ export async function callOpenRouterFlux(
   }
 
   const data = await res.json();
-
-  // Response shape: { data: [{ b64_json }] }
   const items: Array<{ b64_json: string }> = data?.data ?? [];
   if (!items.length) throw new Error("OpenRouter FLUX returned no images");
 
@@ -180,14 +173,14 @@ export async function callOpenRouterFlux(
   return { images, providerName: "openrouter-flux", modelName: OPENROUTER_IMAGE_MODEL };
 }
 
-// ── Fallback chain — Gemini Imagen → OpenRouter FLUX ─────────────────────────
+// ── Fallback chain ────────────────────────────────────────────────────────────
 
 export async function generateImages(
   params: GenerateImageParams
 ): Promise<GenerateImageResult> {
   const chain: { name: ImageProviderName; fn: () => Promise<GenerateImageResult> }[] = [
-    { name: "gemini-imagen",   fn: () => callGeminiImagen(params) },
-    { name: "openrouter-flux", fn: () => callOpenRouterFlux(params) },
+    { name: "gemini-flash-image", fn: () => callGeminiFlashImage(params) },
+    { name: "openrouter-flux",    fn: () => callOpenRouterFlux(params) },
   ];
 
   const errors: string[] = [];
