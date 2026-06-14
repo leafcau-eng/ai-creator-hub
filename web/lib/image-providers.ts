@@ -1,7 +1,7 @@
 // lib/image-providers.ts
-// Phase 6: Image generation — Gemini Flash Image (generateContent) → fallback
+// Phase 6: Image generation — HuggingFace FLUX.1 → Gemini Flash Image (fallback)
 
-export type ImageProviderName = "gemini-flash-image" | "openrouter-flux";
+export type ImageProviderName = "huggingface-flux" | "gemini-flash-image";
 
 export interface GenerateImageParams {
   prompt: string;
@@ -26,19 +26,91 @@ export interface GenerateImageResult {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Build enriched prompt dari style + prompt + aspect ratio hint */
 function buildPrompt(params: GenerateImageParams): string {
   const stylePart = params.style ? `${params.style} style, ` : "";
-  const negPart   = params.negativePrompt ? ` Avoid: ${params.negativePrompt}.` : "";
-  const ratioPart = params.aspectRatio && params.aspectRatio !== "1:1"
-    ? ` Aspect ratio ${params.aspectRatio}.`
-    : "";
-  return `${stylePart}${params.prompt}${negPart}${ratioPart}`.trim();
+  return `${stylePart}${params.prompt}`.trim();
 }
 
-// ── Gemini Flash Image — generateContent endpoint ────────────────────────────
-// Model: gemini-2.5-flash-image (gratis, tidak perlu paid plan)
-// Docs: https://ai.google.dev/gemini-api/docs/image-generation
+// Map aspect ratio → width/height
+function ratioToSize(ratio: string | undefined): { width: number; height: number } {
+  const map: Record<string, { width: number; height: number }> = {
+    "1:1":  { width: 1024, height: 1024 },
+    "16:9": { width: 1344, height: 768  },
+    "9:16": { width: 768,  height: 1344 },
+    "4:3":  { width: 1024, height: 768  },
+  };
+  return map[ratio ?? "1:1"] ?? { width: 1024, height: 1024 };
+}
+
+// ── HuggingFace FLUX.1-schnell ───────────────────────────────────────────────
+// Docs: https://huggingface.co/black-forest-labs/FLUX.1-schnell
+// Inference Providers API — gratis dengan rate limit
+
+const HF_MODEL    = "black-forest-labs/FLUX.1-schnell";
+const HF_API_BASE = "https://router.huggingface.co/hf-inference/models";
+
+export async function callHuggingFaceFlux(
+  params: GenerateImageParams
+): Promise<GenerateImageResult> {
+  const apiKey = process.env.HUGGINGFACE_API_KEY;
+  if (!apiKey) throw new Error("HUGGINGFACE_API_KEY is not set");
+
+  const count = Math.min(params.numOutputs ?? 1, 4);
+  const { width, height } = ratioToSize(params.aspectRatio);
+  const allImages: GeneratedImage[] = [];
+
+  // HF Inference: 1 image per request — loop untuk numOutputs > 1
+  for (let i = 0; i < count; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60000);
+
+    let res: Response;
+    try {
+      res = await fetch(`${HF_API_BASE}/${HF_MODEL}`, {
+        method: "POST",
+        headers: {
+          "Content-Type":  "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          inputs: buildPrompt(params),
+          parameters: {
+            width,
+            height,
+            num_inference_steps: 4, // FLUX schnell optimal di 4 steps
+            ...(params.negativePrompt ? { negative_prompt: params.negativePrompt } : {}),
+          },
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error("HF FLUX STATUS:", res.status);
+      console.error("HF FLUX ERROR:", errBody);
+      throw new Error(`HuggingFace FLUX error ${res.status}: ${errBody}`);
+    }
+
+    // Response: binary image (blob)
+    const blob       = await res.blob();
+    const arrayBuf   = await blob.arrayBuffer();
+    const base64     = Buffer.from(arrayBuf).toString("base64");
+    const mimeType   = blob.type || "image/jpeg";
+
+    allImages.push({ base64, mimeType });
+  }
+
+  if (allImages.length === 0) {
+    throw new Error("HuggingFace FLUX returned no images");
+  }
+
+  return { images: allImages, providerName: "huggingface-flux", modelName: HF_MODEL };
+}
+
+// ── Gemini Flash Image (fallback) ─────────────────────────────────────────────
 
 const GEMINI_IMAGE_MODEL    = "gemini-2.5-flash-image";
 const GEMINI_IMAGE_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -52,7 +124,6 @@ export async function callGeminiFlashImage(
   const count = Math.min(params.numOutputs ?? 1, 4);
   const allImages: GeneratedImage[] = [];
 
-  // generateContent hanya bisa 1 gambar per request — loop untuk numOutputs > 1
   for (let i = 0; i < count; i++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30000);
@@ -65,14 +136,8 @@ export async function callGeminiFlashImage(
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [
-              {
-                parts: [{ text: buildPrompt(params) }],
-              },
-            ],
-            generationConfig: {
-              responseModalities: ["IMAGE", "TEXT"],
-            },
+            contents: [{ parts: [{ text: buildPrompt(params) }] }],
+            generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
           }),
           signal: controller.signal,
         }
@@ -88,9 +153,7 @@ export async function callGeminiFlashImage(
       throw new Error(`Gemini Flash Image error ${res.status}: ${errBody}`);
     }
 
-    const data = await res.json();
-
-    // Response: candidates[0].content.parts[] — cari part dengan inlineData
+    const data  = await res.json();
     const parts = data?.candidates?.[0]?.content?.parts ?? [];
     for (const part of parts) {
       if (part.inlineData?.data) {
@@ -109,78 +172,14 @@ export async function callGeminiFlashImage(
   return { images: allImages, providerName: "gemini-flash-image", modelName: GEMINI_IMAGE_MODEL };
 }
 
-// ── OpenRouter — FLUX.1 Schnell (fallback) ───────────────────────────────────
-
-const OPENROUTER_IMAGE_MODEL    = "black-forest-labs/FLUX.1-schnell";
-const OPENROUTER_IMAGE_API_BASE = "https://openrouter.ai/api/v1/images/generations";
-
-export async function callOpenRouterFlux(
-  params: GenerateImageParams
-): Promise<GenerateImageResult> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
-
-  const sizeMap: Record<string, string> = {
-    "1:1":  "1024x1024",
-    "16:9": "1344x768",
-    "9:16": "768x1344",
-    "4:3":  "1024x768",
-  };
-  const size = sizeMap[params.aspectRatio ?? "1:1"] ?? "1024x1024";
-  const n    = Math.min(params.numOutputs ?? 1, 4);
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000);
-
-  let res: Response;
-  try {
-    res = await fetch(OPENROUTER_IMAGE_API_BASE, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": "https://ai-creator-hub-zeta.vercel.app",
-      },
-      body: JSON.stringify({
-        model:           OPENROUTER_IMAGE_MODEL,
-        prompt:          buildPrompt(params),
-        n,
-        size,
-        response_format: "b64_json",
-      }),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    console.error("OPENROUTER FLUX STATUS:", res.status);
-    console.error("OPENROUTER FLUX ERROR:", errBody);
-    throw new Error(`OpenRouter FLUX error ${res.status}: ${errBody}`);
-  }
-
-  const data = await res.json();
-  const items: Array<{ b64_json: string }> = data?.data ?? [];
-  if (!items.length) throw new Error("OpenRouter FLUX returned no images");
-
-  const images: GeneratedImage[] = items.map((item) => ({
-    base64:   item.b64_json,
-    mimeType: "image/png",
-  }));
-
-  return { images, providerName: "openrouter-flux", modelName: OPENROUTER_IMAGE_MODEL };
-}
-
-// ── Fallback chain ────────────────────────────────────────────────────────────
+// ── Fallback chain — HF FLUX → Gemini Flash Image ────────────────────────────
 
 export async function generateImages(
   params: GenerateImageParams
 ): Promise<GenerateImageResult> {
   const chain: { name: ImageProviderName; fn: () => Promise<GenerateImageResult> }[] = [
+    { name: "huggingface-flux",  fn: () => callHuggingFaceFlux(params) },
     { name: "gemini-flash-image", fn: () => callGeminiFlashImage(params) },
-    { name: "openrouter-flux",    fn: () => callOpenRouterFlux(params) },
   ];
 
   const errors: string[] = [];
