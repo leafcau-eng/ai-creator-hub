@@ -314,7 +314,7 @@ function DashboardPage() {
         // Fetch semua sekaligus
         const [projectsRes, clipsRes, recentRes] = await Promise.all([
           supabase.from("projects").select("id", { count: "exact", head: true }),
-          supabase.from("clips").select("id", { count: "exact", head: true }),
+          supabase.from("clip_results").select("id", { count: "exact", head: true }),
           supabase.from("projects")
             .select("id, title, status, current_step, source_url, created_at")
             .order("created_at", { ascending: false })
@@ -596,7 +596,7 @@ function AutoClipperPage() {
   const fetchClips = useCallback(async (pid) => {
     const supabase = createClient();
     const { data } = await supabase
-      .from("clips")
+      .from("clip_results")
       .select("id, clip_index, title, duration, file_url, thumbnail_url, start_time, end_time")
       .eq("project_id", pid)
       .order("clip_index", { ascending: true });

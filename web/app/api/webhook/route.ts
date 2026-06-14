@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
     // Ambil info project buat notif
     const { data: project } = await supabase
       .from('projects')
-      .select('title, source_url')
+      .select('title, source_url, user_id')
       .eq('id', project_id)
       .single()
 
@@ -65,6 +65,7 @@ export async function POST(req: NextRequest) {
     if (clips && clips.length > 0) {
       const clipsToInsert = clips.map((clip: any, i: number) => ({
         project_id,
+        user_id: project?.user_id,
         clip_index: i + 1,
         title: clip.title || `Clip ${i + 1}`,
         duration: clip.duration || 0,
@@ -72,8 +73,12 @@ export async function POST(req: NextRequest) {
         thumbnail_url: clip.thumbnail_url || null,
         start_time: clip.start || 0,
         end_time: clip.end || 0,
+        score: clip.score || null,
+        hook: clip.hook || null,
+        reason: clip.reason || null,
       }))
-      await supabase.from('clips').insert(clipsToInsert)
+      const { error: clipsError } = await supabase.from('clip_results').insert(clipsToInsert)
+      if (clipsError) console.error('[webhook] clips insert error:', JSON.stringify(clipsError))
     }
 
     // Kirim notif Telegram
