@@ -196,31 +196,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
 }
-export async function GET() {
-  try {
-    const supabaseUser = await createClient();
-    const { data: { user }, error: userError } = await supabaseUser.auth.getUser();
-    if (userError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const supabase = createServiceClient();
-    const { data: jobs, error } = await supabase
-      .from("ai_writer_jobs")
-      .select("id, output_type, prompt, status, output_text, ai_provider_used, ai_model_used, tokens_used, created_at")
-      .eq("user_id", user.id)
-      .eq("status", "completed")
-      .order("created_at", { ascending: false })
-      .limit(20);
-
-    if (error) {
-      console.error("Fetch ai_writer_jobs failed:", error);
-      return NextResponse.json({ error: "Gagal fetch history" }, { status: 500 });
-    }
-
-    return NextResponse.json({ jobs: jobs ?? [] });
-  } catch (err) {
-    console.error("Unexpected error in GET /api/ai-writer:", err);
-    return NextResponse.json({ error: "Server error" }, { status: 500 });
-  }
-}
