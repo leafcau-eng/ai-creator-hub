@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
 
     // 5. Trigger GitHub Actions workflow_dispatch
     const githubRes = await fetch(
-      `https://api.github.com/repos/${githubOwner}/${githubRepo}/actions/workflows/main.yml/dispatches`,
+      `https://api.github.com/repos/${githubOwner}/${githubRepo}/actions/workflows/auto-clipper-v2.yml/dispatches`,
       {
         method: 'POST',
         headers: {
