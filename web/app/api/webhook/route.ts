@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase-server'
+import { createServiceClient } from '@/lib/supabase-server'
 import { NextRequest, NextResponse } from 'next/server'
 
 async function sendTelegram(message: string) {
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'project_id required' }, { status: 400 })
     }
 
-    const supabase = await createClient()
+    const supabase = createServiceClient()
 
     // Ambil info project buat notif
     const { data: project } = await supabase
