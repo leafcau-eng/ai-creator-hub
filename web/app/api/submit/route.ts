@@ -67,7 +67,11 @@ export async function POST(req: NextRequest) {
     const githubPat   = process.env.GITHUB_PAT
 
     if (!githubOwner || !githubRepo || !githubPat) {
-      console.error('[submit] GitHub env vars tidak lengkap')
+      console.error('[submit] GitHub env vars check', {
+        owner: !!githubOwner,
+        repo: !!githubRepo,
+        pat: !!githubPat,
+      })
       await supabase
         .from('projects')
         .update({ status: 'failed', error_message: 'Server config error: GitHub credentials missing' })
