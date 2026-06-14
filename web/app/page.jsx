@@ -1215,6 +1215,9 @@ function AssetLibraryPage() {
     return "other";
   };
 
+  // Map uploadId -> XMLHttpRequest aktif (untuk cancel)
+  const activeXhrRef = useRef({});
+
   const updateUpload = (uploadId, patch) => {
     setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, ...patch } : u)));
   };
@@ -1250,6 +1253,8 @@ function AssetLibraryPage() {
         xhr.open("PUT", signedUrl);
         if (file.type) xhr.setRequestHeader("Content-Type", file.type);
 
+        activeXhrRef.current[uploadId] = xhr;
+
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {
             const pct = Math.round((e.loaded / e.total) * 100);
@@ -1258,10 +1263,18 @@ function AssetLibraryPage() {
         };
 
         xhr.onload = () => {
+          delete activeXhrRef.current[uploadId];
           if (xhr.status >= 200 && xhr.status < 300) resolve();
           else reject(new Error(`Upload gagal (HTTP ${xhr.status})`));
         };
-        xhr.onerror = () => reject(new Error("Upload gagal — koneksi error"));
+        xhr.onerror = () => {
+          delete activeXhrRef.current[uploadId];
+          reject(new Error("Upload gagal — koneksi error"));
+        };
+        xhr.onabort = () => {
+          delete activeXhrRef.current[uploadId];
+          reject(new Error("__CANCELLED__"));
+        };
 
         xhr.send(file);
       });
@@ -1278,10 +1291,11 @@ function AssetLibraryPage() {
       setTimeout(() => removeUpload(uploadId), 2000);
 
     } catch (err) {
-      console.error("[asset-upload] error:", err);
-      updateUpload(uploadId, { status: "error", error: err.message || "Upload gagal" });
+      delete activeXhrRef.current[uploadId];
 
-      // Rollback row kalau sudah ke-insert
+      const wasCancelled = err?.message === "__CANCELLED__";
+
+      // Rollback row kalau sudah ke-insert (berlaku untuk cancel maupun error)
       const current = uploads.find((u) => u.id === uploadId);
       const assetId = current?.assetId;
       if (assetId) {
@@ -1291,6 +1305,25 @@ function AssetLibraryPage() {
           console.error("[asset-upload] rollback error:", delErr);
         }
       }
+
+      if (wasCancelled) {
+        // User membatalkan upload — hapus dari list, tidak perlu ditampilkan sebagai error
+        removeUpload(uploadId);
+        return;
+      }
+
+      console.error("[asset-upload] error:", err);
+      updateUpload(uploadId, { status: "error", error: err.message || "Upload gagal" });
+    }
+  };
+
+  const cancelUpload = (uploadId) => {
+    const xhr = activeXhrRef.current[uploadId];
+    if (xhr) {
+      xhr.abort(); // -> onabort -> reject("__CANCELLED__") -> catch block di atas
+    } else {
+      // Belum sempat ada xhr aktif (masih request signed URL) — langsung remove
+      removeUpload(uploadId);
     }
   };
 
