@@ -1052,7 +1052,7 @@ function ImageStudioPage() {
                               max={max}
                               onChange={(e) => setCropParams((prev) => ({
                                 ...prev,
-                                [key]: Math.max(Number(min), Math.min(Number(max), Number(e.target.value))),
+                                [key]: Math.max(Number(min), Math.min(Number(max) || 8192, Number(e.target.value))),
                               }))}
                             />
                           </div>

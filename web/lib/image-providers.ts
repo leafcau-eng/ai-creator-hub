@@ -100,7 +100,7 @@ export async function callHuggingFaceFlux(
     const base64     = Buffer.from(arrayBuf).toString("base64");
     const mimeType   = blob.type || "image/jpeg";
 
-    allImages.push({ base64, mimeType });
+    allImages.push({ base64, mimeType, width, height });
   }
 
   if (allImages.length === 0) {
