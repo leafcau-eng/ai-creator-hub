@@ -12,9 +12,10 @@ async function getSharp() {
   try {
     const sharp = (await import("sharp")).default;
     return sharp;
-  } catch {
+  } catch (e) {
+    console.error("[sharp import error]", e instanceof Error ? e.stack : e);
     throw new Error("sharp tidak tersedia. Jalankan: npm install sharp");
-  }
+}
 }
 
 export async function POST(req: NextRequest) {
