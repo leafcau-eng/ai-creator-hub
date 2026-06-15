@@ -1203,23 +1203,629 @@ function ImageStudioPage() {
   );
 }
 function VideoStudioPage() {
+  // ── State ──────────────────────────────────────────────────
+  const [videoAssets, setVideoAssets]   = useState([]);
+  const [loadingAssets, setLoadingAssets] = useState(true);
+
+  // Selected source video
+  const [selectedAsset, setSelectedAsset] = useState(null); // { id, name, file_url, duration_seconds, ... }
+
+  // Upload
+  const [uploads, setUploads] = useState([]); // { id, name, progress, status, error }
+  const fileInputRef = useRef(null);
+  const activeXhrRef = useRef({});
+
+  // Trim controls
+  const [videoDuration, setVideoDuration] = useState(0); // detik, dari metadata player
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd, setTrimEnd]     = useState(0);
+  const videoRef = useRef(null);
+
+  // Job submission & polling
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
+  const [job, setJob] = useState(null); // { id, status, error_message, output_asset_id, progress_step }
+  const [resultAsset, setResultAsset] = useState(null); // { id, name, file_url, duration_seconds }
+  const pollRef = useRef(null);
+
+  // ── Fetch video assets ─────────────────────────────────────
+  const fetchVideoAssets = useCallback(async () => {
+    setLoadingAssets(true);
+    try {
+      const res = await fetch("/api/assets");
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Gagal fetch assets");
+      const videos = (json.assets || []).filter((a) => a.type === "video");
+      setVideoAssets(videos);
+    } catch (err) {
+      console.error("[video-studio] fetch assets error:", err);
+    } finally {
+      setLoadingAssets(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchVideoAssets();
+  }, [fetchVideoAssets]);
+
+  // ── Upload helpers (reuse pattern dari Asset Library) ───────
+  const updateUpload = (uploadId, patch) => {
+    setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, ...patch } : u)));
+  };
+
+  const removeUpload = (uploadId) => {
+    setUploads((prev) => prev.filter((u) => u.id !== uploadId));
+  };
+
+  const startUpload = async (file, uploadId) => {
+    try {
+      const res = await fetch("/api/assets/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          contentType: file.type,
+          fileSize: file.size,
+          assetType: "video",
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Gagal memulai upload");
+
+      const { assetId, signedUrl } = json;
+      updateUpload(uploadId, { assetId, status: "uploading" });
+
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", signedUrl);
+        if (file.type) xhr.setRequestHeader("Content-Type", file.type);
+
+        activeXhrRef.current[uploadId] = xhr;
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            updateUpload(uploadId, { progress: pct });
+          }
+        };
+
+        xhr.onload = () => {
+          delete activeXhrRef.current[uploadId];
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`Upload gagal (HTTP ${xhr.status})`));
+        };
+        xhr.onerror = () => {
+          delete activeXhrRef.current[uploadId];
+          reject(new Error("Upload gagal — koneksi error"));
+        };
+        xhr.onabort = () => {
+          delete activeXhrRef.current[uploadId];
+          reject(new Error("__CANCELLED__"));
+        };
+
+        xhr.send(file);
+      });
+
+      const confirmRes = await fetch(`/api/assets/${assetId}/confirm`, { method: "PATCH" });
+      const confirmJson = await confirmRes.json();
+      if (!confirmRes.ok) throw new Error(confirmJson.error || "Gagal konfirmasi upload");
+
+      updateUpload(uploadId, { status: "done", progress: 100 });
+      await fetchVideoAssets();
+
+      // Auto-select video yang baru diupload
+      const localUrl = URL.createObjectURL(file);
+      setSelectedAsset({
+        id: assetId,
+        name: file.name,
+        file_url: localUrl,
+        duration_seconds: null,
+        _justUploaded: true,
+      });
+      setJob(null);
+      setResultAsset(null);
+
+      setTimeout(() => removeUpload(uploadId), 1500);
+
+    } catch (err) {
+      delete activeXhrRef.current[uploadId];
+      const wasCancelled = err?.message === "__CANCELLED__";
+
+      if (wasCancelled) {
+        removeUpload(uploadId);
+        return;
+      }
+      console.error("[video-studio] upload error:", err);
+      updateUpload(uploadId, { status: "error", error: err.message || "Upload gagal" });
+    }
+  };
+
+  const handleFileChange = (e) => {
+    const files = Array.from(e.target.files || []);
+    files.forEach((file) => {
+      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      setUploads((prev) => [...prev, { id: uploadId, name: file.name, progress: 0, status: "starting" }]);
+      startUpload(file, uploadId);
+    });
+    e.target.value = "";
+  };
+
+  const cancelUpload = (uploadId) => {
+    const xhr = activeXhrRef.current[uploadId];
+    if (xhr) xhr.abort();
+    else removeUpload(uploadId);
+  };
+
+  // ── Select video dari Asset Library ─────────────────────────
+  const selectAsset = (asset) => {
+    setSelectedAsset(asset);
+    setJob(null);
+    setResultAsset(null);
+    setVideoDuration(0);
+    setTrimStart(0);
+    setTrimEnd(0);
+  };
+
+  // ── Video metadata loaded → set default trim range ──────────
+  const handleLoadedMetadata = () => {
+    if (!videoRef.current) return;
+    const dur = videoRef.current.duration || 0;
+    setVideoDuration(dur);
+    setTrimStart(0);
+    setTrimEnd(dur);
+  };
+
+  // ── Slider handlers ──────────────────────────────────────────
+  const handleStartChange = (val) => {
+    const v = Math.min(Number(val), trimEnd - 0.1 >= 0 ? trimEnd - 0.1 : 0);
+    setTrimStart(Math.max(0, v));
+  };
+
+  const handleEndChange = (val) => {
+    const v = Math.max(Number(val), trimStart + 0.1);
+    setTrimEnd(Math.min(videoDuration, v));
+  };
+
+  const seekTo = (time) => {
+    if (videoRef.current) videoRef.current.currentTime = time;
+  };
+
+  // ── Submit trim job ────────────────────────────────────────
+  const handleSubmitTrim = async () => {
+    if (!selectedAsset || selectedAsset._justUploaded) {
+      setSubmitError("Tunggu hingga upload selesai diproses oleh server.");
+      return;
+    }
+    if (trimEnd <= trimStart) {
+      setSubmitError("End time harus lebih besar dari start time.");
+      return;
+    }
+
+    setSubmitting(true);
+    setSubmitError(null);
+    setResultAsset(null);
+
+    try {
+      const res = await fetch("/api/video-studio/trim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          asset_id: selectedAsset.id,
+          start_time: trimStart,
+          end_time: trimEnd,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Gagal memulai trim job");
+
+      setJob({ id: json.job_id, status: "queued", error_message: null, output_asset_id: null, progress_step: null });
+      startPolling(json.job_id);
+    } catch (err) {
+      console.error("[video-studio] submit trim error:", err);
+      setSubmitError(err.message || "Gagal memulai trim job");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // ── Polling status video_jobs ───────────────────────────────
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const fetchResultAsset = useCallback(async (assetId) => {
+    try {
+      const res = await fetch("/api/assets");
+      const json = await res.json();
+      if (!res.ok) return;
+      const found = (json.assets || []).find((a) => a.id === assetId);
+      if (found) setResultAsset(found);
+    } catch (err) {
+      console.error("[video-studio] fetch result asset error:", err);
+    }
+  }, []);
+
+  const startPolling = useCallback((jobId) => {
+    stopPolling();
+    const supabase = createClient();
+
+    pollRef.current = setInterval(async () => {
+      const { data, error } = await supabase
+        .from("video_jobs")
+        .select("id, status, error_message, output_asset_id, progress_step")
+        .eq("id", jobId)
+        .single();
+
+      if (error || !data) return;
+
+      setJob(data);
+
+      if (data.status === "completed") {
+        stopPolling();
+        if (data.output_asset_id) {
+          await fetchResultAsset(data.output_asset_id);
+        }
+        await fetchVideoAssets();
+      } else if (data.status === "failed" || data.status === "cancelled") {
+        stopPolling();
+      }
+    }, 3000);
+  }, [stopPolling, fetchResultAsset, fetchVideoAssets]);
+
+  useEffect(() => {
+    return () => stopPolling();
+  }, [stopPolling]);
+
+  // ── Helpers ────────────────────────────────────────────────
+  const formatTime = (secs) => {
+    if (secs == null || isNaN(secs)) return "0:00";
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+
+  const formatSize = (bytes) => {
+    if (!bytes) return "—";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const statusLabel = (status) => {
+    switch (status) {
+      case "queued":     return "Menunggu di queue…";
+      case "processing": return "Sedang memproses trim…";
+      case "completed":  return "Selesai!";
+      case "failed":     return "Gagal";
+      case "cancelled":  return "Dibatalkan";
+      default:           return status || "—";
+    }
+  };
+
+  const statusColor = (status) => {
+    if (status === "completed") return "var(--accent2)";
+    if (status === "failed" || status === "cancelled") return "var(--danger)";
+    if (status === "processing" || status === "queued") return "var(--accent)";
+    return "var(--text-dim)";
+  };
+
+  const panelStyle = {
+    background: "var(--card)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--r-lg)",
+    padding: 20,
+  };
+
+  // ── Render ─────────────────────────────────────────────────
   return (
     <div className="page">
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 24, alignItems: "center" }}>
-        <div className="tabs">
-          {["Text to Video", "Image to Video", "Templates"].map((t, i) => (
-            <div key={t} className={`tab${i === 0 ? " active" : ""}`}>{t}</div>
-          ))}
+      {/* Header */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 18, fontWeight: 700, color: "var(--white)", marginBottom: 4 }}>
+          Video Studio
         </div>
-        <button className="btn btn-primary"><Icon d={icons.plus} size={14} /> New project</button>
+        <div style={{ fontSize: 13, color: "var(--text-dim)" }}>
+          Trim video — upload baru atau pilih dari Asset Library, lalu potong sesuai durasi yang diinginkan.
+        </div>
       </div>
 
-      <EmptyState
-        icon="video"
-        title="No video projects yet"
-        desc="Create your first video from text prompts, images, or pre-built templates."
-        action="Create video"
-      />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        {/* ── LEFT: Source selection ──────────────────────── */}
+        <div style={panelStyle}>
+          <SectionHeader title="Sumber video" />
+
+          {/* Upload zone */}
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              border: "1.5px dashed var(--border)",
+              borderRadius: "var(--r-md)",
+              padding: "20px",
+              textAlign: "center",
+              cursor: "pointer",
+              marginBottom: 16,
+              transition: "border-color .15s",
+            }}
+          >
+            <Icon d={icons.video} size={20} />
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--white)", marginTop: 8 }}>
+              Upload video baru
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>
+              Klik untuk pilih file dari device
+            </div>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="video/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={handleFileChange}
+          />
+
+          {/* Upload progress list */}
+          {uploads.length > 0 && (
+            <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+              {uploads.map((u) => (
+                <div key={u.id} style={{ background: "var(--surface)", borderRadius: "var(--r-sm)", padding: "10px 12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+                    <span style={{ color: "var(--white)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>
+                      {u.name}
+                    </span>
+                    {u.status === "error" ? (
+                      <span style={{ color: "var(--danger)" }}>{u.error}</span>
+                    ) : u.status === "done" ? (
+                      <span style={{ color: "var(--accent2)" }}>Selesai</span>
+                    ) : (
+                      <span
+                        style={{ color: "var(--text-dim)", cursor: "pointer" }}
+                        onClick={() => cancelUpload(u.id)}
+                      >
+                        Batal
+                      </span>
+                    )}
+                  </div>
+                  {u.status !== "error" && (
+                    <div className="progress-bar">
+                      <div
+                        className="progress-fill"
+                        style={{ width: `${u.progress || 0}%`, background: u.status === "done" ? "var(--accent2)" : undefined }}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Asset Library video list */}
+          <div className="section-title" style={{ marginBottom: 10, fontSize: 12 }}>
+            Atau pilih dari Asset Library
+          </div>
+
+          {loadingAssets ? (
+            <div style={{ fontSize: 13, color: "var(--text-dim)" }}>Memuat video…</div>
+          ) : videoAssets.length === 0 ? (
+            <div style={{ fontSize: 13, color: "var(--text-dim)" }}>Belum ada video di Asset Library.</div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, maxHeight: 280, overflowY: "auto" }}>
+              {videoAssets.map((asset) => (
+                <div
+                  key={asset.id}
+                  onClick={() => selectAsset(asset)}
+                  style={{
+                    borderRadius: "var(--r-sm)",
+                    overflow: "hidden",
+                    cursor: "pointer",
+                    border: `2px solid ${selectedAsset?.id === asset.id ? "var(--accent)" : "transparent"}`,
+                    background: "var(--surface)",
+                  }}
+                >
+                  <div style={{ position: "relative", paddingTop: "100%", background: "#000" }}>
+                    <video
+                      src={asset.file_url}
+                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+                      muted
+                    />
+                  </div>
+                  <div style={{ padding: "6px 8px" }}>
+                    <div style={{ fontSize: 11, color: "var(--white)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {asset.name}
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                      {formatSize(asset.file_size_bytes)}
+                      {asset.duration_seconds ? ` · ${formatTime(asset.duration_seconds)}` : ""}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── RIGHT: Preview + trim controls ──────────────── */}
+        <div style={panelStyle}>
+          <SectionHeader title="Trim" />
+
+          {!selectedAsset ? (
+            <EmptyState
+              icon="video"
+              title="Belum ada video terpilih"
+              desc="Upload video baru atau pilih salah satu video dari Asset Library di sebelah kiri."
+            />
+          ) : (
+            <>
+              {selectedAsset._justUploaded && (
+                <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
+                  Preview lokal — refresh daftar untuk submit trim setelah upload diproses server.
+                </div>
+              )}
+
+              <video
+                ref={videoRef}
+                key={selectedAsset.file_url}
+                src={selectedAsset.file_url}
+                controls
+                onLoadedMetadata={handleLoadedMetadata}
+                style={{ width: "100%", borderRadius: "var(--r-md)", background: "#000", marginBottom: 16, maxHeight: 280 }}
+              />
+
+              {videoDuration > 0 && (
+                <>
+                  {/* Start slider */}
+                  <div className="form-group">
+                    <label className="form-label">
+                      Start time: {formatTime(trimStart)}
+                    </label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={videoDuration}
+                      step={0.1}
+                      value={trimStart}
+                      onChange={(e) => { handleStartChange(e.target.value); seekTo(Number(e.target.value)); }}
+                      style={{ width: "100%" }}
+                      disabled={submitting || (job && (job.status === "queued" || job.status === "processing"))}
+                    />
+                  </div>
+
+                  {/* End slider */}
+                  <div className="form-group">
+                    <label className="form-label">
+                      End time: {formatTime(trimEnd)}
+                    </label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={videoDuration}
+                      step={0.1}
+                      value={trimEnd}
+                      onChange={(e) => { handleEndChange(e.target.value); seekTo(Number(e.target.value)); }}
+                      style={{ width: "100%" }}
+                      disabled={submitting || (job && (job.status === "queued" || job.status === "processing"))}
+                    />
+                  </div>
+
+                  {/* Manual numeric input */}
+                  <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+                    <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                      <label className="form-label">Start (detik)</label>
+                      <input
+                        type="number"
+                        className="form-input"
+                        min={0}
+                        max={videoDuration}
+                        step={0.1}
+                        value={trimStart.toFixed(1)}
+                        onChange={(e) => handleStartChange(e.target.value)}
+                        disabled={submitting || (job && (job.status === "queued" || job.status === "processing"))}
+                      />
+                    </div>
+                    <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                      <label className="form-label">End (detik)</label>
+                      <input
+                        type="number"
+                        className="form-input"
+                        min={0}
+                        max={videoDuration}
+                        step={0.1}
+                        value={trimEnd.toFixed(1)}
+                        onChange={(e) => handleEndChange(e.target.value)}
+                        disabled={submitting || (job && (job.status === "queued" || job.status === "processing"))}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 16 }}>
+                    Durasi hasil trim: {formatTime(trimEnd - trimStart)}
+                  </div>
+                </>
+              )}
+
+              {submitError && (
+                <div style={{ fontSize: 12, color: "var(--danger)", marginBottom: 12 }}>
+                  {submitError}
+                </div>
+              )}
+
+              <button
+                className="btn btn-primary"
+                onClick={handleSubmitTrim}
+                disabled={
+                  submitting ||
+                  videoDuration === 0 ||
+                  selectedAsset._justUploaded ||
+                  (job && (job.status === "queued" || job.status === "processing"))
+                }
+                style={{ width: "100%", justifyContent: "center" }}
+              >
+                <Icon d={icons.video} size={14} />
+                {submitting ? "Mengirim…" : "Trim video"}
+              </button>
+
+              {/* Job status */}
+              {job && (
+                <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: "var(--r-sm)", background: "var(--surface)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: job.status === "processing" || job.status === "queued" ? 8 : 0 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: statusColor(job.status), flexShrink: 0 }} />
+                    <span style={{ fontSize: 13, fontWeight: 600, color: "var(--white)" }}>
+                      {statusLabel(job.status)}
+                    </span>
+                  </div>
+
+                  {(job.status === "queued" || job.status === "processing") && (
+                    <div className="progress-bar">
+                      <div className="progress-fill" style={{ width: job.status === "processing" ? "60%" : "20%" }} />
+                    </div>
+                  )}
+
+                  {job.status === "failed" && job.error_message && (
+                    <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 6 }}>
+                      {job.error_message}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Result */}
+              {resultAsset && (
+                <div style={{ marginTop: 16 }}>
+                  <SectionHeader title="Hasil trim" />
+                  <video
+                    src={resultAsset.file_url}
+                    controls
+                    style={{ width: "100%", borderRadius: "var(--r-md)", background: "#000", marginBottom: 12, maxHeight: 280 }}
+                  />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <a
+                      href={resultAsset.file_url}
+                      download={resultAsset.name}
+                      className="btn btn-primary"
+                      style={{ flex: 1, justifyContent: "center" }}
+                    >
+                      <Icon d={icons.plus} size={14} /> Download
+                    </a>
+                    <button
+                      className="btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => selectAsset(resultAsset)}
+                    >
+                      Trim lagi dari hasil ini
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 8 }}>
+                    Tersimpan di Asset Library sebagai &quot;{resultAsset.name}&quot;
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
