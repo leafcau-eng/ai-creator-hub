@@ -45,13 +45,36 @@ function calcHiddenScore(params: {
   return Math.min(score, 100)
 }
 
+async function sendTelegram(message: string) {
+  const token = process.env.TELEGRAM_BOT_TOKEN
+  const chatId = process.env.TELEGRAM_CHAT_ID
+  if (!token || !chatId) return
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' }),
+    })
+  } catch (err) {
+    console.error('Telegram error:', (err as Error).message)
+  }
+}
+
+const newJobs: string[] = []
+let totalInserted = 0
+
 async function upsertJob(job: Record<string, unknown>) {
   const { error } = await supabase.from('jobs').upsert(job, {
     onConflict: 'source_url',
     ignoreDuplicates: true,
   })
-  if (error) console.error(`  ❌ ${job.source_url}:`, error.message)
-  else console.log(`  ✅ ${String(job.title).slice(0, 60)}`)
+  if (error) {
+    console.error(`  ❌ ${job.source_url}:`, error.message)
+  } else {
+    totalInserted++
+    newJobs.push(`• [${job.company_name}] ${String(job.title).slice(0, 50)}`)
+    console.log(`  ✅ ${String(job.title).slice(0, 60)}`)
+  }
 }
 
 async function scrapeRSS() {
@@ -136,7 +159,16 @@ async function scrapeGreenhouse() {
 async function main() {
   await scrapeRSS()
   await scrapeGreenhouse()
-  console.log('\n🏁 Done')
+
+  console.log(`\n🏁 Done — inserted: ${totalInserted}`)
+
+  if (newJobs.length > 0) {
+    const msg = `💼 <b>SCH Job Radar Update</b>\n\n${totalInserted} lowongan baru:\n\n${newJobs.slice(0, 10).join('\n')}${newJobs.length > 10 ? `\n\n...dan ${newJobs.length - 10} lainnya` : ''}`
+    await sendTelegram(msg)
+    console.log('📬 Telegram notifikasi terkirim')
+  } else {
+    console.log('📭 Tidak ada job baru, notifikasi tidak dikirim')
+  }
 }
 
 main().catch((err) => {

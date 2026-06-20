@@ -23,19 +23,33 @@ function detectCategory(title: string, summary: string): string {
   if (/funding|investment|raised|series [a-z]|valuation/.test(text)) return 'funding'
   if (/research|paper|benchmark|arxiv|study|dataset/.test(text)) return 'research'
   if (/opinion|analysis|editorial|why|how to|lessons/.test(text)) return 'opinion'
-  if (/launch|release|model|feature|announce|introducing|update/.test(text)) return 'product'
   return 'product'
+}
+
+async function sendTelegram(message: string) {
+  const token = process.env.TELEGRAM_BOT_TOKEN
+  const chatId = process.env.TELEGRAM_CHAT_ID
+  if (!token || !chatId) return
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' }),
+    })
+  } catch (err) {
+    console.error('Telegram error:', (err as Error).message)
+  }
 }
 
 async function scrape() {
   let totalInserted = 0
   let totalSkipped = 0
+  const newArticles: string[] = []
 
   for (const feed of FEEDS) {
     console.log(`\n📡 Fetching: ${feed.source}`)
     try {
       const parsed = await parser.parseURL(feed.url)
-
       for (const item of parsed.items) {
         const source_url = item.link?.trim()
         if (!source_url) continue
@@ -44,7 +58,6 @@ async function scrape() {
         const summary = item.contentSnippet?.trim() ?? item.summary?.trim() ?? ''
         const published_at = item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString()
         const category = detectCategory(title, summary)
-        const tags: string[] = []
 
         const { error } = await supabase.from('ai_news').upsert(
           {
@@ -54,7 +67,7 @@ async function scrape() {
             source_url,
             published_at,
             category,
-            tags,
+            tags: [],
             raw_payload: item,
             ingested_at: new Date().toISOString(),
           },
@@ -62,19 +75,28 @@ async function scrape() {
         )
 
         if (error) {
-          console.error(`  ❌ Error inserting ${source_url}:`, error.message)
+          console.error(`  ❌ ${source_url}:`, error.message)
         } else {
           totalInserted++
+          newArticles.push(`• [${feed.source}] ${title.slice(0, 60)}`)
           console.log(`  ✅ ${title.slice(0, 60)}`)
         }
       }
     } catch (err) {
-      console.error(`  ⚠️  Failed to fetch ${feed.source}:`, (err as Error).message)
+      console.error(`  ⚠️ Failed: ${(err as Error).message}`)
       totalSkipped++
     }
   }
 
-  console.log(`\n🏁 Done — inserted/updated: ${totalInserted}, feeds failed: ${totalSkipped}`)
+  console.log(`\n🏁 Done — inserted: ${totalInserted}, feeds failed: ${totalSkipped}`)
+
+  if (newArticles.length > 0) {
+    const msg = `🤖 <b>SCH AI Radar Update</b>\n\n${totalInserted} artikel baru masuk:\n\n${newArticles.slice(0, 10).join('\n')}${newArticles.length > 10 ? `\n\n...dan ${newArticles.length - 10} lainnya` : ''}`
+    await sendTelegram(msg)
+    console.log('📬 Telegram notifikasi terkirim')
+  } else {
+    console.log('📭 Tidak ada artikel baru, notifikasi tidak dikirim')
+  }
 }
 
 scrape().catch((err) => {
