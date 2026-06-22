@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // 2. Ambil user dari session — user_id wajib diisi di tabel projects
+    // 2. Ambil user dari session
     const supabaseAuth = await createClient()
     const { data: { user }, error: authError } = await supabaseAuth.auth.getUser()
 
@@ -33,8 +33,7 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // 3. Insert project — pakai serviceClient agar bisa bypass RLS dari route handler
-    //    user_id diisi manual dari session, bukan dari auth.uid() di DB
+    // 3. Insert project
     const supabase = createServiceClient()
 
     const { data: project, error: insertError } = await supabase
@@ -61,20 +60,15 @@ export async function POST(req: NextRequest) {
 
     const project_id = project.id
 
-    // 4. Validasi env vars GitHub
-    const githubOwner = process.env.GITHUB_OWNER
-    const githubRepo  = process.env.GITHUB_REPO
-    const githubPat   = process.env.GITHUB_PAT
+    // 4. Validasi env vars VPS
+    const vpsUrl = process.env.VPS_URL
+    const vpsSecret = process.env.VPS_API_SECRET
 
-    if (!githubOwner || !githubRepo || !githubPat) {
-      console.error('[submit] GitHub env vars check', {
-        owner: !!githubOwner,
-        repo: !!githubRepo,
-        pat: !!githubPat,
-      })
+    if (!vpsUrl || !vpsSecret) {
+      console.error('[submit] VPS env vars missing')
       await supabase
         .from('projects')
-        .update({ status: 'failed', error_message: 'Server config error: GitHub credentials missing' })
+        .update({ status: 'failed', error_message: 'Server config error: VPS credentials missing' })
         .eq('id', project_id)
 
       return NextResponse.json(
@@ -83,46 +77,41 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // 5. Trigger GitHub Actions workflow_dispatch
-    const githubRes = await fetch(
-      `https://api.github.com/repos/${githubOwner}/${githubRepo}/actions/workflows/auto-clipper-v2.yml/dispatches`,
+    // 5. Trigger VPS FastAPI
+    const vpsRes = await fetch(
+      `${vpsUrl}/run/auto-clip`,
       {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${githubPat}`,
-          'Accept': 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
           'Content-Type': 'application/json',
+          'x-api-secret': vpsSecret,
         },
         body: JSON.stringify({
-          ref: 'main',
-          inputs: {
-            url: youtube_url,
-            project_id: project_id,
-          },
+          url: youtube_url,
+          project_id,
         }),
       }
     )
 
-    if (!githubRes.ok) {
-      const errText = await githubRes.text()
-      console.error('[submit] GitHub API error:', githubRes.status, errText)
+    if (!vpsRes.ok) {
+      const errText = await vpsRes.text()
+      console.error('[submit] VPS error:', vpsRes.status, errText)
 
       await supabase
         .from('projects')
         .update({
           status: 'failed',
-          error_message: `Gagal trigger pipeline: HTTP ${githubRes.status}`,
+          error_message: `Gagal trigger pipeline: HTTP ${vpsRes.status}`,
         })
         .eq('id', project_id)
 
       return NextResponse.json(
-        { error: 'Gagal trigger GitHub Actions' },
+        { error: 'Gagal trigger VPS pipeline' },
         { status: 502 }
       )
     }
 
-    // 6. Update status jadi queued setelah berhasil trigger
+    // 6. Update status jadi queued
     await supabase
       .from('projects')
       .update({ status: 'queued' })
@@ -138,4 +127,3 @@ export async function POST(req: NextRequest) {
     )
   }
 }
-
